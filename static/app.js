@@ -1,0 +1,404 @@
+const conversation = document.querySelector("#conversation");
+const messageTemplate = document.querySelector("#messageTemplate");
+const textInput = document.querySelector("#textInput");
+const sendButton = document.querySelector("#sendButton");
+const voiceButton = document.querySelector("#voiceButton");
+const stopButton = document.querySelector("#stopButton");
+const wave = document.querySelector("#wave");
+const modelSelect = document.querySelector("#modelSelect");
+const voiceSelect = document.querySelector("#voiceSelect");
+const asrSelect = document.querySelector("#asrSelect");
+const ttsSelect = document.querySelector("#ttsSelect");
+const fileInput = document.querySelector("#fileInput");
+const attachButton = document.querySelector("#attachButton");
+const attachmentStrip = document.querySelector("#attachmentStrip");
+const sessionSelect = document.querySelector("#sessionSelect");
+const newSessionButton = document.querySelector("#newSessionButton");
+const sessionLabel = document.querySelector("#sessionLabel");
+const usageLabel = document.querySelector("#usageLabel");
+const costLabel = document.querySelector("#costLabel");
+const toolsLabel = document.querySelector("#toolsLabel");
+
+const welcomeMessage = "你好！我是你的AI助手，请选择模型和语音引擎，然后点击麦克风开始对话。";
+
+// Frontend state mirrors the current browser session. The backend remains the
+// source of truth for persisted sessions and message history.
+const state = {
+  messages: [
+    {
+      role: "assistant",
+      content: welcomeMessage,
+    },
+  ],
+  sessionId: null,
+  recognition: null,
+  speaking: false,
+  toolsUsed: [],
+  modelOptions: [],
+  pendingAttachments: [],
+};
+
+function fillWave(active = false) {
+  // The waveform is decorative but state-aware: it animates while recording or
+  // playing synthesized speech.
+  wave.replaceChildren();
+  const values = [8, 12, 18, 24, 30, 34, 32, 26, 18, 12, 9, 10, 14, 22, 29, 34, 30, 22, 14, 10];
+  values.forEach((value, index) => {
+    const bar = document.createElement("span");
+    bar.className = "bar";
+    const boost = active ? Math.sin((Date.now() / 120 + index) * 0.8) * 12 + 14 : 0;
+    bar.style.height = `${Math.max(5, value + boost)}px`;
+    wave.append(bar);
+  });
+}
+
+function renderMessages() {
+  // Re-rendering the small chat list keeps streaming updates simple and avoids
+  // stale button handlers after messages change.
+  conversation.replaceChildren();
+  state.messages.forEach((message) => {
+    const node = messageTemplate.content.firstElementChild.cloneNode(true);
+    node.classList.add(message.role);
+    node.querySelector(".speaker").textContent = message.role === "assistant" ? "AI" : "你";
+    node.querySelector(".content").textContent = `${message.role === "assistant" ? "AI" : "你"}：${message.content}`;
+
+    const actions = node.querySelector(".message-actions");
+    if (message.role === "assistant") {
+      actions.append(actionButton("语音播放 ▶", () => speakText(message.content)));
+      actions.append(actionButton("复制", () => navigator.clipboard?.writeText(message.content)));
+    } else {
+      actions.append(actionButton("语音输入", startVoiceInput));
+    }
+    conversation.append(node);
+  });
+  conversation.scrollTop = conversation.scrollHeight;
+}
+
+function renderAttachments() {
+  attachmentStrip.replaceChildren();
+  attachmentStrip.classList.toggle("has-items", state.pendingAttachments.length > 0);
+  state.pendingAttachments.forEach((attachment) => {
+    const chip = document.createElement("span");
+    chip.className = "attachment-chip";
+
+    const preview = document.createElement("img");
+    preview.src = attachment.url;
+    preview.alt = attachment.filename;
+
+    const label = document.createElement("span");
+    label.textContent = attachment.filename;
+
+    chip.append(preview, label);
+    attachmentStrip.append(chip);
+  });
+}
+
+function actionButton(label, onClick) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = label;
+  button.addEventListener("click", onClick);
+  return button;
+}
+
+async function loadOptions() {
+  const response = await fetch("/api/options");
+  const data = await response.json();
+  state.modelOptions = data.models;
+  setOptions(modelSelect, data.models, "name");
+  setOptions(asrSelect, data.asr_engines, "name");
+  setOptions(ttsSelect, data.tts_engines, "name");
+  setOptions(voiceSelect, [
+    { id: "huoshan-clear-female", name: "火山引擎-清新女声" },
+    { id: "browser-default", name: "浏览器默认语音" },
+  ], "name");
+}
+
+async function loadSessions() {
+  // Session metadata comes from SQLite through the backend. If the database is
+  // empty, create the first conversation automatically.
+  const response = await fetch("/api/sessions");
+  const sessions = await response.json();
+  sessionSelect.replaceChildren();
+
+  sessions.forEach((session) => {
+    const option = document.createElement("option");
+    option.value = session.id;
+    option.textContent = `${session.id} · ${session.title}`;
+    sessionSelect.append(option);
+  });
+
+  if (state.sessionId) {
+    sessionSelect.value = String(state.sessionId);
+  } else if (sessions.length > 0) {
+    state.sessionId = sessions[0].id;
+    sessionSelect.value = String(state.sessionId);
+    await loadHistory(state.sessionId);
+  } else {
+    await createSession();
+  }
+  updateStats();
+}
+
+async function createSession() {
+  const response = await fetch("/api/sessions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title: "新的对话" }),
+  });
+  const session = await response.json();
+  state.sessionId = session.id;
+  state.messages = [{ role: "assistant", content: welcomeMessage }];
+  await loadSessions();
+  renderMessages();
+}
+
+async function loadHistory(sessionId) {
+  const response = await fetch(`/api/sessions/${sessionId}`);
+  const data = await response.json();
+  state.sessionId = data.session.id;
+  state.messages = data.messages.length > 0
+    ? data.messages
+    : [{ role: "assistant", content: welcomeMessage }];
+  renderMessages();
+  updateStats();
+}
+
+function setOptions(select, items, labelKey) {
+  select.replaceChildren();
+  items.forEach((item) => {
+    const option = document.createElement("option");
+    option.value = item.id;
+    option.textContent = item[labelKey];
+    select.append(option);
+  });
+}
+
+async function sendMessage() {
+  // Chat defaults to the SSE endpoint so users see model output as it arrives.
+  const text = textInput.value.trim();
+  if (!text && state.pendingAttachments.length === 0) return;
+
+  const attachments = [...state.pendingAttachments];
+  const attachmentText = attachments.length > 0
+    ? `\n[图片：${attachments.map((item) => item.filename).join("，")}]`
+    : "";
+  state.messages.push({ role: "user", content: `${text || "请分析这张图片。"}${attachmentText}` });
+  textInput.value = "";
+  state.pendingAttachments = [];
+  renderAttachments();
+  renderMessages();
+
+  const history = state.messages.map(({ role, content }) => ({ role, content }));
+  const pending = { role: "assistant", content: "" };
+  state.toolsUsed = [];
+  updateStats();
+  state.messages.push(pending);
+  renderMessages();
+
+  try {
+    const response = await fetch("/api/chat/stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: modelSelect.value,
+        session_id: state.sessionId,
+        messages: history,
+        attachments,
+      }),
+    });
+    if (!response.ok) throw new Error(await response.text());
+    await readChatStream(response, pending);
+  } catch (error) {
+    pending.content = `调用失败：${error.message}`;
+  }
+  renderMessages();
+  await loadSessions();
+}
+
+async function uploadImages(files) {
+  const selectedFiles = Array.from(files);
+  if (selectedFiles.length === 0) return;
+
+  const form = new FormData();
+  selectedFiles.forEach((file) => form.append("files", file));
+  const response = await fetch("/api/uploads", {
+    method: "POST",
+    body: form,
+  });
+  if (!response.ok) {
+    const error = await response.text();
+    state.messages.push({ role: "assistant", content: `图片上传失败：${error}` });
+    renderMessages();
+    return;
+  }
+
+  const data = await response.json();
+  state.pendingAttachments.push(...data.attachments);
+  ensureVisionModelSelected();
+  renderAttachments();
+}
+
+function ensureVisionModelSelected() {
+  const current = state.modelOptions.find((model) => model.id === modelSelect.value);
+  if (current?.supports_vision) return;
+  const visionModel = state.modelOptions.find((model) => model.supports_vision);
+  if (visionModel) modelSelect.value = visionModel.id;
+}
+
+async function readChatStream(response, pending) {
+  // The backend emits SSE frames. We parse them manually because fetch streams
+  // support POST bodies while EventSource only supports GET.
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const events = buffer.split("\n\n");
+    buffer = events.pop() || "";
+    for (const eventText of events) {
+      handleStreamEvent(eventText, pending);
+    }
+  }
+}
+
+function handleStreamEvent(eventText, pending) {
+  // meta/tool/token/done/error events keep UI state, tool visibility, and usage
+  // accounting synchronized with the backend.
+  const lines = eventText.split("\n");
+  const event = lines.find((line) => line.startsWith("event: "))?.slice(7);
+  const dataLine = lines.find((line) => line.startsWith("data: "));
+  if (!event || !dataLine) return;
+
+  const data = JSON.parse(dataLine.slice(6));
+  if (event === "meta") {
+    state.sessionId = data.session_id;
+    updateStats();
+  }
+  if (event === "token") {
+    pending.content += data.text;
+    renderMessages();
+  }
+  if (event === "tool") {
+    state.toolsUsed.push(data);
+    updateStats();
+  }
+  if (event === "done") {
+    state.sessionId = data.session_id;
+    state.toolsUsed = data.tools_used || state.toolsUsed;
+    updateStats(data.usage, data.cost);
+  }
+  if (event === "error") {
+    pending.content = `调用失败：${data.message}`;
+  }
+}
+
+function updateStats(usage = null, cost = null) {
+  sessionLabel.textContent = `会话：${state.sessionId ?? "未创建"}`;
+  if (usage) {
+    usageLabel.textContent = `Tokens：${usage.total_tokens}（输入 ${usage.prompt_tokens} / 输出 ${usage.completion_tokens}）`;
+  }
+  if (cost) {
+    costLabel.textContent = `费用：$${cost.total_cost.toFixed(8)}`;
+  }
+  toolsLabel.textContent = state.toolsUsed.length > 0
+    ? `工具：${state.toolsUsed.map((tool) => tool.title).join("、")}`
+    : "工具：未调用";
+}
+
+function startVoiceInput() {
+  // Browser ASR is useful for demos because it does not need backend keys.
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SpeechRecognition) {
+    textInput.value = "今天北京天气怎么样？";
+    return;
+  }
+
+  const recognition = new SpeechRecognition();
+  recognition.lang = "zh-CN";
+  recognition.interimResults = true;
+  recognition.continuous = false;
+  state.recognition = recognition;
+
+  recognition.onstart = () => {
+    voiceButton.classList.add("recording");
+    voiceButton.textContent = "正在听...";
+  };
+  recognition.onresult = (event) => {
+    const transcript = Array.from(event.results)
+      .map((result) => result[0].transcript)
+      .join("");
+    textInput.value = transcript;
+  };
+  recognition.onend = () => {
+    voiceButton.classList.remove("recording");
+    voiceButton.textContent = "按住说话";
+  };
+  recognition.start();
+}
+
+async function speakText(text) {
+  // Cloud TTS engines return audio_url; browser TTS engines return null and use
+  // SpeechSynthesis locally.
+  const response = await fetch("/api/tts", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ engine: ttsSelect.value, text }),
+  });
+  const data = await response.json();
+
+  if (data.audio_url) {
+    const audio = new Audio(data.audio_url);
+    state.speaking = true;
+    audio.addEventListener("ended", () => {
+      state.speaking = false;
+    });
+    audio.addEventListener("error", () => {
+      state.speaking = false;
+    });
+    await audio.play();
+    return;
+  }
+
+  if (!window.speechSynthesis) return;
+  window.speechSynthesis.cancel();
+  const utterance = new SpeechSynthesisUtterance(text);
+  utterance.lang = "zh-CN";
+  utterance.onstart = () => {
+    state.speaking = true;
+  };
+  utterance.onend = () => {
+    state.speaking = false;
+  };
+  window.speechSynthesis.speak(utterance);
+}
+
+function stopAll() {
+  state.recognition?.stop();
+  window.speechSynthesis?.cancel();
+  state.speaking = false;
+}
+
+sendButton.addEventListener("click", sendMessage);
+textInput.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") sendMessage();
+});
+voiceButton.addEventListener("click", startVoiceInput);
+stopButton.addEventListener("click", stopAll);
+attachButton.addEventListener("click", () => fileInput.click());
+fileInput.addEventListener("change", async () => {
+  await uploadImages(fileInput.files);
+  fileInput.value = "";
+});
+newSessionButton.addEventListener("click", createSession);
+sessionSelect.addEventListener("change", () => loadHistory(Number(sessionSelect.value)));
+
+setInterval(() => fillWave(state.speaking || voiceButton.classList.contains("recording")), 160);
+fillWave(false);
+renderMessages();
+renderAttachments();
+await loadOptions();
+await loadSessions();

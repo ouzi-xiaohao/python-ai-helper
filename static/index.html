@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ouzi-AI</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-mark">OA</span>
+          <div class="brand-copy">
+            <span class="brand-name">ouzi-AI</span>
+            <span class="brand-subtitle">Multimodal assistant workspace</span>
+          </div>
+        </div>
+        <nav class="top-actions" aria-label="顶部操作">
+          <select id="sessionSelect" aria-label="会话选择"></select>
+          <button class="ghost-button" id="newSessionButton" type="button">新会话</button>
+          <span class="status-pill">Online</span>
+        </nav>
+      </header>
+
+      <section class="stats-strip" aria-label="调用统计">
+        <span id="sessionLabel">会话：未创建</span>
+        <span id="usageLabel">Tokens：0</span>
+        <span id="costLabel">费用：$0.00000000</span>
+        <span id="toolsLabel">工具：未调用</span>
+      </section>
+
+      <section class="conversation" id="conversation" aria-live="polite"></section>
+
+      <section class="wave-panel" aria-label="音频波形可视化">
+        <span>音频波形可视化</span>
+        <div class="wave" id="wave"></div>
+      </section>
+
+      <section class="composer" aria-label="输入区">
+        <div class="input-row">
+          <button class="primary-button" id="voiceButton" type="button">按住说话</button>
+          <input
+            id="textInput"
+            type="text"
+            autocomplete="off"
+            placeholder="文字输入..."
+            aria-label="文字输入"
+          />
+          <input
+            id="fileInput"
+            class="visually-hidden"
+            type="file"
+            accept="image/png,image/jpeg,image/webp,image/gif"
+            multiple
+            aria-label="上传图片"
+          />
+          <button class="icon-button" id="attachButton" type="button" title="上传图片">📎</button>
+          <button class="icon-button" id="sendButton" type="button" title="发送">➤</button>
+          <button class="icon-button" id="stopButton" type="button" title="停止">■</button>
+        </div>
+
+        <div class="attachment-strip" id="attachmentStrip" aria-label="图片附件"></div>
+
+        <div class="select-grid">
+          <label>
+            模型
+            <select id="modelSelect"></select>
+          </label>
+          <label>
+            语音
+            <select id="voiceSelect"></select>
+          </label>
+          <label>
+            ASR
+            <select id="asrSelect"></select>
+          </label>
+          <label>
+            TTS
+            <select id="ttsSelect"></select>
+          </label>
+        </div>
+      </section>
+    </main>
+
+    <template id="messageTemplate">
+      <article class="message">
+        <div class="speaker"></div>
+        <div class="bubble">
+          <div class="content"></div>
+          <div class="message-actions"></div>
+        </div>
+      </article>
+    </template>
+
+    <script src="/static/app.js" type="module"></script>
+  </body>
+</html>
