@@ -1,1 +1,1 @@
-"""ouzi-AI backend package."""
+"""Campus service assistant backend package."""

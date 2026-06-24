@@ -12,7 +12,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     # Core application metadata.
-    app_name: str = "ouzi-AI"
+    app_name: str = "校园服务智能助手"
+    admin_username: str = "admin"
+    admin_password: str = "admin123"
+    user_username: str = "user"
+    user_password: str = "user123"
+    auth_token_secret: str = "change-me-in-production"
+    auth_token_expire_minutes: int = 720
 
     # LLM provider credentials. Empty values are allowed; providers fall back
     # to the local demo channel when the corresponding key is not configured.

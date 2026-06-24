@@ -18,8 +18,22 @@ const sessionLabel = document.querySelector("#sessionLabel");
 const usageLabel = document.querySelector("#usageLabel");
 const costLabel = document.querySelector("#costLabel");
 const toolsLabel = document.querySelector("#toolsLabel");
+const scenarioTitle = document.querySelector("#scenarioTitle");
+const scenarioSubtitle = document.querySelector("#scenarioSubtitle");
+const scenarioActions = document.querySelector("#scenarioActions");
+const knowledgeCount = document.querySelector("#knowledgeCount");
+const knowledgeHint = document.querySelector("#knowledgeHint");
+const knowledgeFileInput = document.querySelector("#knowledgeFileInput");
+const knowledgeUploadButton = document.querySelector("#knowledgeUploadButton");
+const loginPanel = document.querySelector("#loginPanel");
+const loginForm = document.querySelector("#loginForm");
+const usernameInput = document.querySelector("#usernameInput");
+const passwordInput = document.querySelector("#passwordInput");
+const loginError = document.querySelector("#loginError");
+const userLabel = document.querySelector("#userLabel");
+const logoutButton = document.querySelector("#logoutButton");
 
-const welcomeMessage = "你好！我是你的AI助手，请选择模型和语音引擎，然后点击麦克风开始对话。";
+let welcomeMessage = "你好！我是校园服务智能助手，可以帮你做办事咨询、宿舍报修、图片故障描述和实时信息查询。";
 
 // Frontend state mirrors the current browser session. The backend remains the
 // source of truth for persisted sessions and message history.
@@ -36,7 +50,83 @@ const state = {
   toolsUsed: [],
   modelOptions: [],
   pendingAttachments: [],
+  knowledgeDocuments: [],
+  authToken: localStorage.getItem("ouzi_auth_token"),
+  currentUser: null,
 };
+
+async function apiFetch(url, options = {}) {
+  const headers = new Headers(options.headers || {});
+  if (state.authToken) headers.set("Authorization", `Bearer ${state.authToken}`);
+  const response = await fetch(url, { ...options, headers });
+  if (response.status === 401) {
+    logout(false);
+    throw new Error("登录已过期，请重新登录。");
+  }
+  return response;
+}
+
+function showLogin(message = "") {
+  loginPanel.classList.remove("hidden");
+  loginError.textContent = message;
+}
+
+function hideLogin() {
+  loginPanel.classList.add("hidden");
+  loginError.textContent = "";
+}
+
+function logout(reload = true) {
+  state.authToken = null;
+  state.currentUser = null;
+  localStorage.removeItem("ouzi_auth_token");
+  userLabel.textContent = "未登录";
+  updateKnowledgePermission();
+  showLogin();
+  if (reload) {
+    state.messages = [{ role: "assistant", content: welcomeMessage }];
+    renderMessages();
+  }
+}
+
+async function login(username, password) {
+  const response = await fetch("/api/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password }),
+  });
+  if (!response.ok) {
+    throw new Error("用户名或密码错误");
+  }
+  const data = await response.json();
+  state.authToken = data.access_token;
+  state.currentUser = { username: data.username, role: data.role };
+  localStorage.setItem("ouzi_auth_token", state.authToken);
+  userLabel.textContent = `${data.username} · ${data.role}`;
+  updateKnowledgePermission();
+  hideLogin();
+}
+
+async function loadCurrentUser() {
+  if (!state.authToken) return false;
+  try {
+    const response = await apiFetch("/api/me");
+    if (!response.ok) return false;
+    state.currentUser = await response.json();
+    userLabel.textContent = `${state.currentUser.username} · ${state.currentUser.role}`;
+    updateKnowledgePermission();
+    hideLogin();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function updateKnowledgePermission() {
+  const canUploadKnowledge = state.currentUser?.role === "admin";
+  knowledgeUploadButton.hidden = !canUploadKnowledge;
+  knowledgeFileInput.disabled = !canUploadKnowledge;
+}
 
 function fillWave(active = false) {
   // The waveform is decorative but state-aware: it animates while recording or
@@ -102,22 +192,46 @@ function actionButton(label, onClick) {
 }
 
 async function loadOptions() {
-  const response = await fetch("/api/options");
+  const response = await apiFetch("/api/options");
   const data = await response.json();
   state.modelOptions = data.models;
   setOptions(modelSelect, data.models, "name");
   setOptions(asrSelect, data.asr_engines, "name");
   setOptions(ttsSelect, data.tts_engines, "name");
+  renderScenario(data.scenario);
   setOptions(voiceSelect, [
     { id: "huoshan-clear-female", name: "火山引擎-清新女声" },
     { id: "browser-default", name: "浏览器默认语音" },
   ], "name");
 }
 
+function renderScenario(scenario) {
+  if (!scenario) return;
+  scenarioTitle.textContent = scenario.name;
+  scenarioSubtitle.textContent = scenario.subtitle;
+  welcomeMessage = `你好！我是${scenario.name}，可以处理${scenario.badges.join("、")}等问题。`;
+  state.messages = state.messages.length === 1 && state.messages[0].role === "assistant"
+    ? [{ role: "assistant", content: welcomeMessage }]
+    : state.messages;
+  scenarioActions.replaceChildren();
+
+  scenario.quick_actions.forEach((action) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = action.label;
+    button.addEventListener("click", () => {
+      textInput.value = action.prompt;
+      textInput.focus();
+    });
+    scenarioActions.append(button);
+  });
+  renderMessages();
+}
+
 async function loadSessions() {
   // Session metadata comes from SQLite through the backend. If the database is
   // empty, create the first conversation automatically.
-  const response = await fetch("/api/sessions");
+  const response = await apiFetch("/api/sessions");
   const sessions = await response.json();
   sessionSelect.replaceChildren();
 
@@ -140,8 +254,51 @@ async function loadSessions() {
   updateStats();
 }
 
+async function loadKnowledgeDocuments() {
+  const response = await apiFetch("/api/knowledge");
+  if (!response.ok) return;
+  state.knowledgeDocuments = await response.json();
+  renderKnowledgeStatus();
+}
+
+function renderKnowledgeStatus(uploading = false) {
+  const count = state.knowledgeDocuments.length;
+  knowledgeCount.textContent = `${count} 份资料`;
+  knowledgeHint.textContent = uploading
+    ? "正在入库..."
+    : count > 0
+      ? `最近：${state.knowledgeDocuments[0].filename}`
+      : state.currentUser?.role === "admin"
+        ? "支持 txt / md / pdf / docx"
+        : "普通用户可使用资料问答";
+}
+
+async function uploadKnowledgeFiles(files) {
+  if (state.currentUser?.role !== "admin") return;
+  const selectedFiles = Array.from(files);
+  if (selectedFiles.length === 0) return;
+  renderKnowledgeStatus(true);
+
+  for (const file of selectedFiles) {
+    const form = new FormData();
+    form.append("file", file);
+    const response = await apiFetch("/api/knowledge/upload", {
+      method: "POST",
+      body: form,
+    });
+    if (!response.ok) {
+      const error = await response.text();
+      state.messages.push({ role: "assistant", content: `知识库上传失败：${error}` });
+      renderMessages();
+      continue;
+    }
+  }
+
+  await loadKnowledgeDocuments();
+}
+
 async function createSession() {
-  const response = await fetch("/api/sessions", {
+  const response = await apiFetch("/api/sessions", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ title: "新的对话" }),
@@ -154,7 +311,7 @@ async function createSession() {
 }
 
 async function loadHistory(sessionId) {
-  const response = await fetch(`/api/sessions/${sessionId}`);
+  const response = await apiFetch(`/api/sessions/${sessionId}`);
   const data = await response.json();
   state.sessionId = data.session.id;
   state.messages = data.messages.length > 0
@@ -197,7 +354,7 @@ async function sendMessage() {
   renderMessages();
 
   try {
-    const response = await fetch("/api/chat/stream", {
+    const response = await apiFetch("/api/chat/stream", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -222,7 +379,7 @@ async function uploadImages(files) {
 
   const form = new FormData();
   selectedFiles.forEach((file) => form.append("files", file));
-  const response = await fetch("/api/uploads", {
+  const response = await apiFetch("/api/uploads", {
     method: "POST",
     body: form,
   });
@@ -343,7 +500,7 @@ function startVoiceInput() {
 async function speakText(text) {
   // Cloud TTS engines return audio_url; browser TTS engines return null and use
   // SpeechSynthesis locally.
-  const response = await fetch("/api/tts", {
+  const response = await apiFetch("/api/tts", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ engine: ttsSelect.value, text }),
@@ -393,6 +550,21 @@ fileInput.addEventListener("change", async () => {
   await uploadImages(fileInput.files);
   fileInput.value = "";
 });
+knowledgeUploadButton.addEventListener("click", () => knowledgeFileInput.click());
+knowledgeFileInput.addEventListener("change", async () => {
+  await uploadKnowledgeFiles(knowledgeFileInput.files);
+  knowledgeFileInput.value = "";
+});
+loginForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  try {
+    await login(usernameInput.value.trim(), passwordInput.value);
+    await initAppData();
+  } catch (error) {
+    showLogin(error.message);
+  }
+});
+logoutButton.addEventListener("click", () => logout());
 newSessionButton.addEventListener("click", createSession);
 sessionSelect.addEventListener("change", () => loadHistory(Number(sessionSelect.value)));
 
@@ -400,5 +572,19 @@ setInterval(() => fillWave(state.speaking || voiceButton.classList.contains("rec
 fillWave(false);
 renderMessages();
 renderAttachments();
-await loadOptions();
-await loadSessions();
+
+async function initAppData() {
+  await loadOptions();
+  await loadKnowledgeDocuments();
+  await loadSessions();
+}
+
+async function initApp() {
+  if (await loadCurrentUser()) {
+    await initAppData();
+  } else {
+    showLogin();
+  }
+}
+
+await initApp();

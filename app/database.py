@@ -69,6 +69,33 @@ def init_db() -> None:
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (session_id) REFERENCES chat_sessions(id)
             );
+
+            CREATE TABLE IF NOT EXISTS knowledge_documents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                filename TEXT NOT NULL,
+                content_type TEXT NOT NULL,
+                path TEXT NOT NULL,
+                chunk_count INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS knowledge_chunks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                document_id INTEGER NOT NULL,
+                chunk_index INTEGER NOT NULL,
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (document_id) REFERENCES knowledge_documents(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'user',
+                is_active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
             """
         )
 
@@ -81,6 +108,36 @@ def create_session(title: str | None = None) -> sqlite3.Row:
             (session_title,),
         )
         return cursor.fetchone()
+
+
+def create_user(*, username: str, password_hash: str, role: str = "user") -> sqlite3.Row:
+    """Create an application user for local authentication."""
+    with connect() as db:
+        cursor = db.execute(
+            """
+            INSERT INTO users (username, password_hash, role)
+            VALUES (?, ?, ?)
+            RETURNING *
+            """,
+            (username, password_hash, role),
+        )
+        return cursor.fetchone()
+
+
+def get_user_by_username(username: str) -> sqlite3.Row | None:
+    with connect() as db:
+        return db.execute(
+            "SELECT * FROM users WHERE username = ?",
+            (username,),
+        ).fetchone()
+
+
+def get_user_by_id(user_id: int) -> sqlite3.Row | None:
+    with connect() as db:
+        return db.execute(
+            "SELECT * FROM users WHERE id = ?",
+            (user_id,),
+        ).fetchone()
 
 
 def list_sessions() -> list[sqlite3.Row]:
@@ -199,6 +256,68 @@ def list_audits(limit: int = 100) -> list[sqlite3.Row]:
             """
             SELECT * FROM model_call_audits
             ORDER BY created_at DESC, id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+
+
+def create_knowledge_document(
+    *,
+    filename: str,
+    content_type: str,
+    path: str,
+    chunk_count: int,
+) -> sqlite3.Row:
+    """Create one knowledge document metadata row."""
+    with connect() as db:
+        cursor = db.execute(
+            """
+            INSERT INTO knowledge_documents (filename, content_type, path, chunk_count)
+            VALUES (?, ?, ?, ?)
+            RETURNING *
+            """,
+            (filename, content_type, path, chunk_count),
+        )
+        return cursor.fetchone()
+
+
+def add_knowledge_chunks(document_id: int, chunks: list[str]) -> None:
+    """Persist text chunks for keyword retrieval."""
+    with connect() as db:
+        db.executemany(
+            """
+            INSERT INTO knowledge_chunks (document_id, chunk_index, content)
+            VALUES (?, ?, ?)
+            """,
+            [(document_id, index, chunk) for index, chunk in enumerate(chunks)],
+        )
+
+
+def list_knowledge_documents() -> list[sqlite3.Row]:
+    with connect() as db:
+        return db.execute(
+            """
+            SELECT * FROM knowledge_documents
+            ORDER BY created_at DESC, id DESC
+            """
+        ).fetchall()
+
+
+def list_knowledge_chunks(limit: int = 2000) -> list[sqlite3.Row]:
+    with connect() as db:
+        return db.execute(
+            """
+            SELECT
+                knowledge_chunks.id,
+                knowledge_chunks.document_id,
+                knowledge_chunks.chunk_index,
+                knowledge_chunks.content,
+                knowledge_documents.filename
+            FROM knowledge_chunks
+            JOIN knowledge_documents
+              ON knowledge_documents.id = knowledge_chunks.document_id
+            ORDER BY knowledge_documents.id DESC, knowledge_chunks.chunk_index ASC
             LIMIT ?
             """,
             (limit,),

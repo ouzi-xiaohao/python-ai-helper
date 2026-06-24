@@ -39,6 +39,24 @@ class ChatRequest(BaseModel):
     enable_tools: bool = True
 
 
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class AuthResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    username: str
+    role: str
+
+
+class CurrentUser(BaseModel):
+    id: int
+    username: str
+    role: str
+
+
 class ChatResponse(BaseModel):
     """Full non-streaming chat response."""
 
@@ -72,6 +90,20 @@ class AttachmentInfo(BaseModel):
 
 class UploadResponse(BaseModel):
     attachments: list[AttachmentInfo]
+
+
+class KnowledgeDocument(BaseModel):
+    """Document metadata stored in the lightweight knowledge base."""
+
+    id: int
+    filename: str
+    content_type: str
+    chunk_count: int
+    created_at: str
+
+
+class KnowledgeUploadResponse(BaseModel):
+    document: KnowledgeDocument
 
 
 class SessionCreate(BaseModel):

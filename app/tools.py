@@ -13,6 +13,7 @@ import re
 from zoneinfo import ZoneInfo
 
 import httpx
+from langchain_core.tools import tool
 
 from app.config import Settings
 from app.schemas import ChatMessage, ToolResult
@@ -141,6 +142,13 @@ async def current_datetime_tool() -> ToolResult:
     )
 
 
+@tool("current_datetime")
+async def current_datetime_langchain_tool() -> str:
+    """获取当前北京时间。"""
+    result = await current_datetime_tool()
+    return result.content
+
+
 async def weather_tool(query: str) -> ToolResult:
     """Fetch demo-friendly live weather from wttr.in."""
     city = extract_weather_city(query)
@@ -167,6 +175,13 @@ async def weather_tool(query: str) -> ToolResult:
         f"湿度 {current.get('humidity', '?')}%。"
     )
     return ToolResult(name="weather", title="实时天气", content=content)
+
+
+@tool("weather_lookup")
+async def weather_langchain_tool(query: str) -> str:
+    """根据用户问题查询城市实时天气。"""
+    result = await weather_tool(query)
+    return result.content
 
 
 def extract_weather_city(query: str) -> str:
@@ -291,16 +306,23 @@ async def serpapi_search(query: str, api_key: str) -> ToolResult:
 
 
 async def run_tools(messages: list[ChatMessage], settings: Settings) -> list[ToolResult]:
-    """Execute all tools selected for the latest user question."""
+    """Execute all tools selected for the latest user question.
+
+    Tools are exposed as LangChain tools, then invoked explicitly here. This
+    keeps the current deterministic behavior while moving the tool layer onto
+    LangChain primitives.
+    """
     if not settings.enable_tools:
         return []
 
     decision = decide_tools(messages)
     results: list[ToolResult] = []
     if decision.use_time:
-        results.append(await current_datetime_tool())
+        content = await current_datetime_langchain_tool.ainvoke({})
+        results.append(ToolResult(name="current_datetime", title="当前日期时间", content=content))
     if decision.use_weather:
-        results.append(await weather_tool(decision.query))
+        content = await weather_langchain_tool.ainvoke({"query": decision.query})
+        results.append(ToolResult(name="weather", title="实时天气", content=content))
     if decision.use_search:
         results.append(await web_search_tool(decision.query, settings))
     return results

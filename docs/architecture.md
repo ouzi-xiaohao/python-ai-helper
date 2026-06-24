@@ -1,10 +1,14 @@
-# ouzi-AI 架构设计
+# 校园服务智能助手架构设计
 
 ## 分层
 
 - `static/`：前端页面，负责聊天界面、模型选择、语音输入、语音播放和波形展示。
 - `app/main.py`：FastAPI 路由层，提供页面、配置、聊天、ASR、TTS 接口。
-- `app/providers.py`：LLM provider 适配层，统一 DeepSeek、豆包、百炼和本地演示模型。
+- `app/providers.py`：模型目录层，描述可选模型及其能力标签。
+- `app/scenario.py`：场景配置层，集中维护服务台提示词、快捷问题和前端场景文案。
+- `app/auth.py`：认证鉴权层，负责密码哈希、Token 签发、登录用户和管理员权限校验。
+- `app/knowledge.py`：知识库层，负责文档上传、文本抽取、切块和混合检索。
+- `app/langchain_runtime.py`：LangChain 运行时层，负责消息转换与模型调用。
 - `app/speech.py`：语音能力适配层，统一 ASR 与 TTS 引擎。
 - `app/uploads.py`：图片上传、类型校验、本地存储和 data URL 转换。
 - `app/schemas.py`：请求/响应模型，保证前后端契约清晰。
@@ -17,7 +21,15 @@
 
 ### `GET /api/options`
 
-返回模型、ASR、TTS 引擎列表，供前端下拉框渲染。
+返回模型、ASR、TTS 引擎列表和当前场景配置，供前端下拉框与快捷问题渲染。
+
+### `POST /api/login`
+
+登录接口，校验本地用户账号密码后返回 Bearer Token。前端把 token 存入 `localStorage`，后续请求通过 `Authorization` 请求头传入。
+
+### `GET /api/me`
+
+返回当前登录用户信息，用于页面初始化时恢复登录态。
 
 ### `POST /api/chat`
 
@@ -70,6 +82,14 @@
 }
 ```
 
+### `POST /api/knowledge/upload`
+
+上传知识库文件，支持 `txt`、`md`、`pdf`、`docx`。后端会保存文件、抽取文本、切块并写入 SQLite。
+
+### `GET /api/knowledge`
+
+返回已入库文档列表，供前端展示资料数量和最近上传文件。
+
 ### `POST /api/sessions`
 
 创建会话。
@@ -99,6 +119,18 @@
 ### `model_call_audits`
 
 记录每次模型调用的 provider、模型、输入 token、输出 token、总 token、费用、耗时、状态和错误信息。
+
+### `knowledge_documents`
+
+保存知识库文件名、类型、存储路径、切块数量和创建时间。
+
+### `knowledge_chunks`
+
+保存文档切分后的文本片段，用于聊天前的资料检索。
+
+### `users`
+
+保存登录账号、密码哈希、角色、启用状态和创建时间。默认启动时会创建管理员账号。
 
 ## Token 与费用统计
 
@@ -130,9 +162,37 @@
 
 ## 模型接入策略
 
-当前 DeepSeek、豆包、百炼都走 `OpenAICompatibleProvider`。如果某个厂商接口参数不同，建议新增独立 provider 类，实现同样的 `chat()` 方法，路由层不需要改动。
+当前 DeepSeek、豆包、百炼都走 `LangChain + ChatOpenAI(OpenAI-compatible)` 方案；本地演示模型使用自定义运行时。若某个厂商接口协议不同，可以新增独立 LangChain runtime，而不需要改动路由层。
 
-视觉问答通过 `ChatRequest.attachments` 传入图片附件。后端在 provider 层把附件转为 `image_url` content part，格式兼容 OpenAI-style 多模态接口。纯文本模型会在路由层被拦截，避免把图片误发给不支持视觉的模型。
+视觉问答通过 `ChatRequest.attachments` 传入图片附件。后端在 LangChain 运行时层把附件转为 `image_url` content part，格式兼容 OpenAI-style 多模态接口。纯文本模型会在路由层被拦截，避免把图片误发给不支持视觉的模型。
+
+## 场景化策略
+
+当前项目默认包装成“校园服务智能助手”，场景层会在模型调用前追加系统提示词，让模型优先按办事咨询、宿舍报修、图片故障描述、天气出行等服务台任务组织回答。
+
+前端通过 `/api/options` 获取场景标题、说明和快捷问题。后续切换到“企业 IT 服务台”“政务办事助手”“医院导诊助手”等场景时，优先修改 `app/scenario.py`，再按业务需要扩展工具、知识库或表单字段。
+
+## 知识库策略
+
+当前知识库采用轻量混合 RAG：
+
+- 上传资料后保存到 `data/knowledge/`。
+- 文本被切成重叠片段并存入 SQLite。
+- 用户提问时，后端按关键词重叠、文件名/标题匹配和字符 n-gram 相似度综合排序。
+- 命中的片段会作为“知识库”工具结果注入模型上下文。
+
+这种方案部署简单，适合演示和小规模资料。资料量变大后，可以把 `app/knowledge.py` 中的 `search_knowledge()` 替换为向量检索、BM25 或全文检索。
+
+## 鉴权策略
+
+当前项目使用本地用户表和签名 Bearer Token：
+
+- 密码通过 PBKDF2 哈希后存储，不保存明文密码。
+- Token 使用服务端密钥签名，并带过期时间。
+- 普通业务接口和知识库上传需要登录用户。
+- 审计接口要求 `admin` 角色。
+
+该方案适合本地部署、课程设计和小型内部系统演示。生产系统可进一步替换为 JWT 标准库、OAuth2/OIDC、RBAC 权限表和用户维度的数据隔离。
 
 ## 工具调用策略
 
@@ -142,7 +202,7 @@
 - 实时天气：通过 `wttr.in` 查询，适合演示用途
 - 联网搜索：优先 Tavily，其次 SerpAPI
 
-工具结果会被写入一条临时 `system` 消息，再交给模型回答。这样即使厂商接口暂未启用 function calling，也能让模型利用实时信息。流式接口会额外返回 `tool` 事件，前端统计栏会显示本次调用了哪些工具。
+工具结果会先通过 LangChain tools 执行，再写入一条临时 `system` 消息交给模型回答。这样即使厂商接口暂未启用原生 function calling，也能让模型利用实时信息。流式接口会额外返回 `tool` 事件，前端统计栏会显示本次调用了哪些工具。
 
 可选配置：
 
@@ -169,6 +229,7 @@ SERPAPI_API_KEY=...
 
 ## 后续可扩展点
 
-- 增加文件/图片上传，实现视觉问答
 - 增加 WebSocket 双向语音会话
 - 将 provider 配置改为数据库或管理后台动态配置
+- 将轻量混合知识库升级为向量库，支持更大规模资料和语义检索
+- 增加用户维度的数据隔离，让不同用户只看到自己的会话和资料
